@@ -1,0 +1,18 @@
+name = "agent-broker"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+[vars]
+QUEUE_DB = "762ba07d-0318-4ab0-895a-af6e5f5e3144"
+
+# KV binding for agent inboxes.
+# Andrew: create the `agent-inbox` namespace in the Cloudflare dashboard
+# (Storage -> KV), copy its ID, paste it below, and push.
+# (Alternatively bind it in the dashboard UI; keep only ONE of the two.)
+# [[kv_namespaces]]
+# binding = "INBOX"
+# id = "PASTE_KV_NAMESPACE_ID_HERE"
+
+# Watcher: check the Notion Agent Queue every 5 minutes, nudge agent inboxes.
+[triggers]
+crons = ["*/5 * * * *"]
