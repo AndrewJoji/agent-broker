@@ -200,7 +200,11 @@ export default {
     } catch (e) {
       return json({ ok: false, error: e.message }, 503);
     }
-    if (!authorized(req, env)) return json({ ok: false, error: "unauthorized" }, 401);
+    // Auth: writes require BROKER_KEY; reads stay open so secret-less
+    // hooks (which cannot hold credentials) can poll inboxes.
+    if (req.method !== "GET" && req.method !== "HEAD" && !authorized(req, env)) {
+      return json({ ok: false, error: "unauthorized" }, 401);
+    }
 
     if (parts.length === 1 && parts[0] === "health") {
       return json({ ok: true, ts: Date.now() });
