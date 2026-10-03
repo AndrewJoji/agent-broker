@@ -174,9 +174,14 @@ rows itself (give it a dedicated Notion internal integration in that case).
 
 - Inbox traffic is task metadata, not secrets. `BROKER_KEY` is defense in
   depth, not a vault.
-- The worker never sees Muse/Claude credentials. `NOTION_TOKEN` is a scoped
-  Notion internal integration (Agent Queue database only), stored as a
-  Cloudflare secret.
+- The worker never sees Muse/Claude credentials. `NOTION_TOKEN` is a Notion
+  credential stored as a Cloudflare secret. Two options: a scoped internal
+  integration (Agent Queue database only, shared with it), or a personal
+  access token (simpler — sees everything the account sees, so no sharing
+  step; caveat: tied to the account, not the workspace — if revoked or the
+  account leaves the workspace, the watcher stops).
+- Token in use: personal access token `agent-broker`, created 2026-10-02,
+  expires 2027-10-02. A renewal reminder is scheduled for 2027-09-11.
 - Hook detector scripts must not contain secrets (runtime constraint).
 - The worker is public by URL; treat the URL as semi-private and set
   `BROKER_KEY` before any sensitive use.

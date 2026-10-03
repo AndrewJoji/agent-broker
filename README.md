@@ -40,8 +40,11 @@ expire after 7 days automatically.
    dashboard: Worker → Settings → Bindings → KV Namespace, variable `INBOX`.
    Use only one of the two.
 4. Worker → Settings → Variables → secrets:
-   - `NOTION_TOKEN` — token from a Notion internal integration
-     (notion.so/my-integrations) with the Agent Queue database shared to it.
+   - `NOTION_TOKEN` — a Notion credential. Either a personal access token
+     (Settings → Connections → develop; simplest, sees everything the account
+     sees), or a token from an internal integration with the Agent Queue
+     database shared to it. Current token: personal access token
+     `agent-broker`, expires 2027-10-02; renewal reminder set for 2027-09-11.
    - `BROKER_KEY` — any random string; share it with the agents via the secure
      vault. Optional; without it the broker is open.
 5. The cron trigger (`*/5 * * * *`) is declared in `wrangler.toml` and applies
