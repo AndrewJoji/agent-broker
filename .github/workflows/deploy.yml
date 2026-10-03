@@ -1,0 +1,62 @@
+# Deploys the Worker with wrangler on every push to main (and on demand).
+# Replaces Cloudflare Workers Builds, which failed to initialize three times
+# on 2026-10-02 with no code change involved.
+#
+# Repo secrets (Settings -> Secrets and variables -> Actions):
+#   CLOUDFLARE_API_TOKEN   token made from the "Edit Cloudflare Workers" template
+#   CLOUDFLARE_ACCOUNT_ID  Workers & Pages overview, right-hand sidebar
+#
+# Worker secrets (NOTION_TOKEN, BROKER_KEY, QUEUE_DB) live on the Worker in the
+# Cloudflare dashboard and survive every deploy. The KV binding and the cron
+# come from wrangler.toml.
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Syntax check
+        run: node --check src/index.js
+
+  deploy:
+    needs: check
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-agent-broker
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Deploy to Cloudflare Workers
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@4 deploy
+      # Runs after the deploy, so a failure here is a red check, not a rollback.
+      # The 401 check doubles as a canary that BROKER_KEY is still set on the Worker.
+      - name: Smoke test
+        run: |
+          sleep 10
+          curl -sSf https://agent-broker.andrewjoji71.workers.dev/health
+          echo
+          code=$(curl -s -o /dev/null -w '%{http_code}' https://agent-broker.andrewjoji71.workers.dev/inbox/muse)
+          test "$code" = "401" || { echo "expected 401 on GET /inbox/muse without key, got $code"; exit 1; }
+          curl -sSf https://agent-broker.andrewjoji71.workers.dev/inbox/muse/peek
+          echo
