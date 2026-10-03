@@ -70,14 +70,8 @@ async function postMessage(req, env, agent) {
 }
 
 async function getInbox(env, agent, url) {
-  if (url.searchParams.get("debug") === "nolist") return json({ ok: true, agent, debug: "no-list-path" });
   const limit = Math.min(parseInt(url.searchParams.get("limit") || "50", 10) || 50, 200);
-  let list;
-  try {
-    list = await env.INBOX.list({ prefix: `inbox:${agent}:`, limit });
-  } catch (e) {
-    return json({ ok: false, error: "list() threw: " + String((e && e.stack) || e) }, 500);
-  }
+  const list = await env.INBOX.list({ prefix: `inbox:${agent}:`, limit });
   const msgs = [];
   for (const k of list.keys) {
     const v = await env.INBOX.get(k.name);
