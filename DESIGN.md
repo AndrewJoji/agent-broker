@@ -216,6 +216,7 @@ rows itself (give it a dedicated Notion internal integration in that case).
 | Muse VM replaced | Hook may need re-enabling | Hourly poll (kept as backstop) or manual `hooks.enable`; hook scripts live in persistent home |
 | Agent dies mid-task | Row stays `Running` with last `Checkpoint` | Stale-claim rule: another agent (or the same one later) resumes from the checkpoint |
 | `*.workers.dev` unreachable from agent network (Cloudflare error 1042) | Inbox polls fail; agents never wake | Poll via the portfolio proxy (`/api/agent-broker/*`) or a custom domain; never rely on the raw `workers.dev` URL from restricted networks |
+| Cloudflare gzips larger worker responses; proxy passed `content-encoding: gzip` through after decompressing | Clients receive plain text labeled as gzip → empty/garbled bodies | When buffering the upstream body (which decompresses), strip both `content-length` and `content-encoding` (learned 2026-10-02: broke `GET /inbox` for an hour) |
 | Workers Builds tracking wrong branch | Pushes to `main` never deploy | Settings → Builds → Branch control: production branch must be `main` (2026-10-02: it was tracking a leftover `__access_test__` branch) |
 | `workers.dev` URL toggle disabled | Worker deployed but URL serves nothing | Domains tab: enable the Production `workers.dev` URL |
 
