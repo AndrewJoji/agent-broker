@@ -72,54 +72,33 @@ leaves `Queued` and comes back, it is announced again.
 The minimal protocol for how agents claim and finish rows, plus the full set
 of suggested properties, is in [docs/protocol.md](docs/protocol.md).
 
-## Quickstart (fork and deploy)
+## Setup
 
-You need a Notion account, a free Cloudflare account and Node 18+.
+Two ways in, covering the same steps (Notion queue, Notion integration,
+Cloudflare account and KV, deploy, secrets, test, connect agents):
 
-1. **Fork and clone** this repo.
-2. **Create the queue** in Notion with the properties above (see
-   [docs/protocol.md](docs/protocol.md) for the full minimal schema).
-3. **Get a Notion token.** Create an internal integration
-   (Notion → Settings → Connections → Develop or manage integrations), then
-   open your queue database → `•••` → Connections → add the integration.
-   Read access is enough for the broker.
-4. **Create a KV namespace** in Cloudflare (Storage & Databases → KV) and
-   put its id in `wrangler.toml` under `[[kv_namespaces]]`, replacing the one
-   there.
-5. **Deploy**, either:
-   - locally: `npx wrangler@4 login` then `npx wrangler@4 deploy`, or
-   - via GitHub Actions: add repository secrets `CLOUDFLARE_API_TOKEN`
-     (Cloudflare → My Profile → API Tokens → "Edit Cloudflare Workers"
-     template) and `CLOUDFLARE_ACCOUNT_ID`, then push to `main`. Optionally
-     add a `BROKER_URL` secret (your Worker's URL) to enable the post-deploy
-     smoke test.
-6. **Set the Worker secrets** (Worker → Settings → Variables and Secrets, or
-   `npx wrangler@4 secret put <NAME>`):
+- **Do it yourself:** [docs/setup.md](docs/setup.md), a click-by-click
+  walkthrough assuming no Cloudflare experience, with a troubleshooting
+  table. About 30–45 minutes.
+- **Have your agent do it:** point your coding or computer-use agent at
+  [AGENTS.md](AGENTS.md). It gives the agent the full context, a resumable
+  step-by-step procedure with verification checks, and explicit stop points.
+  The agent asks before creating or deploying anything, and leaves logins,
+  API tokens and secret values to you.
 
-   | Secret | Value |
-   |---|---|
-   | `NOTION_TOKEN` | The integration token from step 3 |
-   | `QUEUE_DB` | Your queue database id (the 32-character id in its URL) |
-   | `BROKER_KEY` | A long random string, e.g. `openssl rand -hex 32` |
+The short version, if you've done this before:
 
-   Without `BROKER_KEY` every route is open; only do that for local testing.
-   Without `NOTION_TOKEN` or `QUEUE_DB` the watcher does nothing but the
-   inboxes still work.
-7. **Try it:**
-
-   ```sh
-   URL=https://agent-broker.<your-subdomain>.workers.dev
-   KEY=<your BROKER_KEY>
-   curl $URL/health
-   curl -X POST $URL/inbox/test -H "x-broker-key: $KEY" \
-        -d '{"from":"me","type":"note","text":"hello"}'
-   curl $URL/inbox/test/peek                       # -> count 1
-   curl $URL/inbox/test -H "x-broker-key: $KEY"    # -> the message
-   ```
-
-   Then add a row to your queue with `Status = Queued` and `Owner = test`,
-   and call `POST /watcher/run-now` (with the key) instead of waiting for
-   the cron.
+1. Fork. Create the Notion database (schema above) and an internal
+   integration with read access, connected to it.
+2. Create a KV namespace and put its id in `wrangler.toml`.
+3. Deploy with `npx wrangler@4 deploy`, or via GitHub Actions with repo
+   secrets `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` and optionally
+   `BROKER_URL` (enables the post-deploy smoke test).
+4. Set Worker secrets `NOTION_TOKEN`, `QUEUE_DB` (the database id) and
+   `BROKER_KEY` (a long random string). Without `BROKER_KEY` every route is
+   open; only do that for local testing.
+5. `curl <url>/health`, then test with a queued row and
+   `POST /watcher/run-now`.
 
 For local development, put the secrets in a `.dev.vars` file (gitignored)
 and run `npx wrangler@4 dev`.
@@ -210,8 +189,10 @@ Roughly in the order I expect to get to them:
 | `src/index.js` | The whole Worker: routes, auth, watcher. Plain JavaScript, no build step |
 | `wrangler.toml` | Worker name, KV binding, cron |
 | `.github/workflows/deploy.yml` | Syntax check on PRs; deploy and smoke test on `main` |
-| `DESIGN.md` | Why it is built this way, failure modes, lessons learned |
+| `docs/setup.md` | Step-by-step setup for people |
+| `AGENTS.md` | Setup and working instructions for an AI agent acting for you |
 | `docs/protocol.md` | The minimal queue protocol agents follow |
+| `DESIGN.md` | Why it is built this way, failure modes, lessons learned |
 
 ## License
 
