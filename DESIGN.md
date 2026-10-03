@@ -149,6 +149,20 @@ loop every N minutes:
   deleted; only schedules tied to specific recurring work stay).
 - **Future workers:** the loop *is* the worker's main. No scheduler at all.
 
+**Reachability constraint (learned 2026-10-02):** `*.workers.dev` URLs are
+unreachable from any client behind Cloudflare's Worker-to-`workers.dev`
+fetch block (Cloudflare error 1042) — this includes Muse's VM, whose egress
+proxy is itself a Cloudflare Worker. Agent polling MUST use a
+normally-reachable address, never the raw `workers.dev` URL, from such
+networks. Current solution: the portfolio site proxies `/api/agent-broker/*`
+to the worker (`src/app/api/agent-broker/[...path]/route.ts` in the
+portfolio repo), so the hook polls
+`https://andrewjoji.com/api/agent-broker/inbox/muse`. A custom domain on the
+worker would also work but requires the domain's DNS to live in Cloudflare;
+andrewjoji.com's DNS is on Vercel, so that option was rejected (do not click
+"Onboard domain" in the worker's Domains tab — it starts moving the whole
+domain's DNS).
+
 ## 4. Connecting a new agent
 
 Checklist (this is the whole integration):
@@ -185,6 +199,12 @@ rows itself (give it a dedicated Notion internal integration in that case).
 - Hook detector scripts must not contain secrets (runtime constraint).
 - The worker is public by URL; treat the URL as semi-private and set
   `BROKER_KEY` before any sensitive use.
+- This repo is public, which is fine: it contains no secrets (`NOTION_TOKEN`
+  lives only as a Cloudflare secret; the IDs in `wrangler.toml` are opaque
+  identifiers, not credentials). Keep it that way — never commit tokens or
+  keys. If `BROKER_KEY` is ever enabled on the worker, the portfolio proxy
+  must attach `Authorization: Bearer <key>` from a server-side env var (the
+  hook cannot hold secrets, so the proxy is the right place).
 
 ## 6. Failure modes
 
@@ -195,6 +215,9 @@ rows itself (give it a dedicated Notion internal integration in that case).
 | Notion API down / token revoked | Watcher logs error to `watcher:last-run`, broker keeps working | Check `GET /watcher`; re-issue token |
 | Muse VM replaced | Hook may need re-enabling | Hourly poll (kept as backstop) or manual `hooks.enable`; hook scripts live in persistent home |
 | Agent dies mid-task | Row stays `Running` with last `Checkpoint` | Stale-claim rule: another agent (or the same one later) resumes from the checkpoint |
+| `*.workers.dev` unreachable from agent network (Cloudflare error 1042) | Inbox polls fail; agents never wake | Poll via the portfolio proxy (`/api/agent-broker/*`) or a custom domain; never rely on the raw `workers.dev` URL from restricted networks |
+| Workers Builds tracking wrong branch | Pushes to `main` never deploy | Settings → Builds → Branch control: production branch must be `main` (2026-10-02: it was tracking a leftover `__access_test__` branch) |
+| `workers.dev` URL toggle disabled | Worker deployed but URL serves nothing | Domains tab: enable the Production `workers.dev` URL |
 
 Delivery is poll-based throughout: expect minutes of latency, not seconds.
 That is acceptable for queue work.
@@ -219,3 +242,8 @@ are deleted.
       for secret-less hook detectors.
 - [ ] `GET /inbox/:agent` `since` parameter for incremental reads (currently
       clients track acked IDs instead).
+- [ ] Portfolio repo pipeline (for the `/api/agent-broker` proxy): Vercel
+      auto-deploys on push; CI (`build`: lint + typecheck + build) runs on PRs
+      and pushes to `main`/`staging`; `main` is branch-protected (PR required,
+      `build` check must pass, strict). No approving-review requirement —
+      solo repo, GitHub doesn't let you approve your own PRs.

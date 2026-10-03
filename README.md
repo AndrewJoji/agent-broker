@@ -51,6 +51,26 @@ expire after 7 days automatically.
    on deploy. No manual scheduler setup needed.
 6. Send the `workers.dev` URL to Muse.
 
+## Deployment notes (Workers Builds)
+
+- **Production branch:** Settings → Builds → Branch control must say `main`.
+  (2026-10-02: it was tracking a leftover `__access_test__` branch, so pushes
+  to `main` silently never deployed.)
+- **Deploy command:** `npx wrangler deploy`. Build command: none (no build step).
+- **Domains tab:** the Production `workers.dev` URL toggle must be enabled,
+  or the URL serves nothing.
+- Pushes to `main` auto-deploy. Watch progress at Workers & Pages →
+  agent-broker → Deployments. The fastest "is it live?" check is loading
+  `https://<worker>/health` in a browser — JSON means deployed.
+
+## Reachability
+
+`*.workers.dev` URLs are unreachable from networks behind Cloudflare's
+Worker-to-`workers.dev` fetch block (error 1042) — including Muse's VM.
+Agent inbox polling goes through the portfolio proxy instead:
+`https://andrewjoji.com/api/agent-broker/...` forwards to the worker
+(see the portfolio repo, `src/app/api/agent-broker/[...path]/route.ts`).
+
 ## Agent polling convention
 
 Instead of scanning the whole Notion queue on a timer:
