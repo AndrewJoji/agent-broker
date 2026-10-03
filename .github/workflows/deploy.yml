@@ -1,14 +1,16 @@
-# Deploys the Worker with wrangler on every push to main (and on demand).
-# Replaces Cloudflare Workers Builds, which failed to initialize three times
-# on 2026-10-02 with no code change involved.
+# Syntax-checks every PR; on pushes to main (or manual runs) deploys the
+# Worker with wrangler and smoke-tests it.
 #
 # Repo secrets (Settings -> Secrets and variables -> Actions):
 #   CLOUDFLARE_API_TOKEN   token made from the "Edit Cloudflare Workers" template
 #   CLOUDFLARE_ACCOUNT_ID  Workers & Pages overview, right-hand sidebar
+#   BROKER_URL             optional; the Worker's base URL, e.g.
+#                          https://agent-broker.<subdomain>.workers.dev
+#                          Kept as a secret so it is masked in public logs.
+#                          If unset, the smoke test is skipped.
 #
-# Worker secrets (NOTION_TOKEN, BROKER_KEY, QUEUE_DB) live on the Worker in the
-# Cloudflare dashboard and survive every deploy. The KV binding and the cron
-# come from wrangler.toml.
+# Worker secrets (NOTION_TOKEN, BROKER_KEY, QUEUE_DB) live on the Worker and
+# survive every deploy. The KV binding and the cron come from wrangler.toml.
 
 name: Deploy
 
@@ -52,11 +54,17 @@ jobs:
       # Runs after the deploy, so a failure here is a red check, not a rollback.
       # The 401 check doubles as a canary that BROKER_KEY is still set on the Worker.
       - name: Smoke test
+        env:
+          BROKER_URL: ${{ secrets.BROKER_URL }}
         run: |
+          if [ -z "$BROKER_URL" ]; then
+            echo "BROKER_URL secret not set; skipping smoke test"
+            exit 0
+          fi
           sleep 10
-          curl -sSf https://agent-broker.andrewjoji71.workers.dev/health
+          curl -sSf "$BROKER_URL/health"
           echo
-          code=$(curl -s -o /dev/null -w '%{http_code}' https://agent-broker.andrewjoji71.workers.dev/inbox/muse)
-          test "$code" = "401" || { echo "expected 401 on GET /inbox/muse without key, got $code"; exit 1; }
-          curl -sSf https://agent-broker.andrewjoji71.workers.dev/inbox/muse/peek
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$BROKER_URL/inbox/smoke-test")
+          test "$code" = "401" || { echo "expected 401 on GET /inbox/smoke-test without key, got $code"; exit 1; }
+          curl -sSf "$BROKER_URL/inbox/smoke-test/peek"
           echo

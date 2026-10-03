@@ -2,15 +2,16 @@ name = "agent-broker"
 main = "src/index.js"
 compatibility_date = "2026-10-01"
 
-# No [vars]: QUEUE_DB (the Notion Agent Queue database id) is a Worker secret,
-# set in the dashboard alongside NOTION_TOKEN and BROKER_KEY, so this public
-# repo carries no Notion ids. Secrets survive every `wrangler deploy`.
+# No [vars]: NOTION_TOKEN, BROKER_KEY and QUEUE_DB (the Notion queue database
+# id) are Worker secrets, set in the dashboard or with `wrangler secret put`.
+# Secrets survive every `wrangler deploy`; [vars] would be overwritten.
 
-# KV binding for agent inboxes (namespace `agent-inbox`, created in dashboard).
+# KV binding for agent inboxes. Forks: create your own KV namespace and
+# replace this id with yours (it is an identifier, not a credential).
 [[kv_namespaces]]
 binding = "INBOX"
 id = "e68348adf3f54bdaa9c55afa39275dcd"
 
-# Watcher: check the Notion Agent Queue every 5 minutes, nudge agent inboxes.
+# Watcher: check the Notion queue every 5 minutes and nudge agent inboxes.
 [triggers]
 crons = ["*/5 * * * *"]
