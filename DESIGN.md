@@ -227,19 +227,21 @@ rows itself (give it a dedicated Notion internal integration in that case).
   considered and rejected: Notion content is plain text visible to anyone with
   page/API access, and it would create a circular dependency (broker protects
   the queue, queue holds the broker's key).
-- This repo is public, which is fine: it contains no secrets (`NOTION_TOKEN`
-  lives only as a Cloudflare secret; the IDs in `wrangler.toml` are opaque
-  identifiers, not credentials). Keep it that way — never commit tokens or
-  keys. The portfolio proxy must **not** hold the key: it is reachable by
+- This repo is public, which is fine: it contains no secrets (`NOTION_TOKEN`,
+  `BROKER_KEY` and `QUEUE_DB` live only as Cloudflare secrets; the KV
+  namespace id in `wrangler.toml` is an opaque identifier, not a credential).
+  Keep it that way — never commit tokens, keys or Notion ids. The portfolio proxy must **not** hold the key: it is reachable by
   anyone, so a key attached server-side would reopen every gated route to
   the public. It forwards `x-broker-key` unchanged; callers that need gated
   routes send the header themselves, and the hook only calls `/peek`.
   (The comment at the top of the proxy's `route.ts` still describes the old
   idea and should be updated.)
-- `QUEUE_DB` (a Notion database id) is committed in `wrangler.toml`. It is
-  not a credential, but Andrew's stated condition for keeping this repo
-  public was "no secrets or Notion IDs". Option: move it to a Worker secret
-  and drop the `[vars]` block; the code reads `env.QUEUE_DB` either way.
+- `QUEUE_DB` (the Agent Queue's Notion database id) was a `[vars]` entry in
+  `wrangler.toml` until 2026-10-03; it is now a Worker secret, because
+  Andrew's condition for keeping this repo public is "no secrets or Notion
+  IDs". The code reads `env.QUEUE_DB` either way. The old value remains in
+  git history; it is an identifier, not a credential, and the database is
+  only reachable with `NOTION_TOKEN`.
 
 ## 6. Failure modes
 

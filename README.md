@@ -50,6 +50,9 @@ expire after 7 days automatically.
    - `BROKER_KEY` — any random string (`openssl rand -hex 32`). Provision it
      to each agent individually through that agent's secure credential
      mechanism. Without it the broker is open (dev mode only).
+   - `QUEUE_DB` — the Agent Queue database id (the 32-hex id in the
+     database's Notion URL). A secret, not a `[vars]` entry, so this public
+     repo carries no Notion ids. Without it the watcher no-ops.
 4. GitHub repo → Settings → Secrets and variables → Actions → repository
    secrets: `CLOUDFLARE_API_TOKEN` (My Profile → API Tokens → Create Token →
    "Edit Cloudflare Workers" template) and `CLOUDFLARE_ACCOUNT_ID` (Workers &
@@ -66,8 +69,10 @@ expire after 7 days automatically.
   `/inbox/muse` 401 without key, `/inbox/muse/peek` 200).
 - Pull requests run only the syntax check.
 - Re-run on demand: Actions → Deploy → Run workflow.
-- Worker secrets survive deploys. Bindings, `[vars]` and the cron come from
-  `wrangler.toml` and are reapplied on every deploy.
+- Worker secrets (`NOTION_TOKEN`, `BROKER_KEY`, `QUEUE_DB`) survive deploys.
+  The KV binding and the cron come from `wrangler.toml` and are reapplied on
+  every deploy. Plaintext `[vars]` are not used: `wrangler deploy` replaces
+  them with whatever the file says, so anything sensitive must be a secret.
 - The fastest "is it live?" check is loading
   `https://agent-broker.andrewjoji71.workers.dev/health` in a browser.
 - **Why not Workers Builds:** it was the original pipeline and failed to
