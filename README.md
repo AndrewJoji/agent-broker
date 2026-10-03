@@ -96,3 +96,4 @@ must not contain the key — they only do GETs.
 ## Local dev
 
 No build step — plain JavaScript. Syntax check: `node --check src/index.js`.
+
