@@ -1,131 +1,199 @@
 # agent-broker
 
-Shared message broker + queue watcher for the agent team (Muse, Claude, future workers).
+> **Status: experimental, work in progress.** I built this for my own
+> multi-agent setup and share it as-is. It runs my system today, but parts
+> of it are unfinished (see [Status](#status) and [Roadmap](#roadmap)) and it
+> may change without notice. **Forks are welcome; support is not offered.**
+> Issues are turned off and pull requests may not be reviewed. If it is
+> useful to you, fork it and make it yours.
 
-One Cloudflare Worker does two jobs:
+A tiny Cloudflare Worker that lets several AI agents share one task queue in
+Notion without each of them burning tokens checking an empty queue.
 
-1. **Message broker (HTTP).** Each agent has an inbox. Anyone with the key can
-   post a message to anyone's inbox; recipients poll their own inbox with one
-   cheap KV read instead of waking a full session to scan the queue.
-2. **Queue watcher (cron, every 5 min).** Queries the Notion Agent Queue for
-   `Status = Queued` rows and drops a "work waiting" note into each owner's
-   inbox. No more token-burning polls of an empty queue.
+## The problem
 
-Free tier, no credit card needed. Deploys from this repo via GitHub Actions
-(`.github/workflows/deploy.yml`) on every push to `main`.
+If you run more than one AI agent (say a chat assistant, a coding agent and a
+personal agent) and coordinate them through a shared Notion task database,
+each agent has to keep checking that database for work. A check means waking
+a full agent session, and most of a session's tokens go to re-reading context,
+so even an empty check costs almost as much as real work. Agents also have no
+direct way to message each other: they can only write rows and hope the other
+side's next poll notices.
+
+## What it does
+
+One Worker, two jobs:
+
+1. **Queue watcher (cron, every 5 minutes).** Plain code, zero AI tokens.
+   It queries the Notion queue for rows with `Status = Queued`, groups them
+   by `Owner`, and drops a "work waiting" note into each owner's inbox.
+2. **Inboxes (HTTP).** Every agent has an inbox in Cloudflare KV. Agents
+   check theirs with one cheap request and only wake a real session when
+   there is mail. Any agent holding the key can also message any other agent
+   directly.
+
+```
+Notion queue  --(watcher, every 5 min)-->  KV inboxes  <--(cheap peek)--  agents
+ (source of truth)                          inbox:<agent>:*                wake only on mail
+```
+
+Notion stays the source of truth for tasks and their state. The broker never
+writes to Notion; it only reads queued rows and tells the right agent. Agents
+claim and update rows themselves, following a small protocol
+([docs/protocol.md](docs/protocol.md)).
+
+The whole thing fits in Cloudflare's free tier.
+
+## Status
+
+| Piece | State |
+|---|---|
+| Inboxes, auth, watcher, GitHub Actions deploy | Working |
+| First agent consumer (a secret-less polling hook that wakes a session) | Working, being moved to the `/peek` route |
+| Second agent consumer (an always-on desktop coding-agent session) | Not built yet |
+| Per-agent keys | Not built; one shared key today |
+| Tests | None beyond a syntax check and a post-deploy smoke test |
+
+## How it works with Notion
+
+The watcher reads four properties from your queue database. Everything else
+in the database is up to you.
+
+| Property | Notion type | Used for |
+|---|---|---|
+| `Task` | Title | Shown in the inbox note |
+| `Status` | **Select** (not Notion's built-in *Status* type) | Watcher looks for the option `Queued` |
+| `Owner` | Select | Which inbox gets the note. Lowercased, so `Claude` goes to inbox `claude` |
+| `Priority` | Select (optional) | Shown in the inbox note |
+
+Rows with no `Owner` are skipped. Each queued row is announced once; if it
+leaves `Queued` and comes back, it is announced again.
+
+The minimal protocol for how agents claim and finish rows, plus the full set
+of suggested properties, is in [docs/protocol.md](docs/protocol.md).
+
+## Setup
+
+Two ways in, covering the same steps (Notion queue, Notion integration,
+Cloudflare account and KV, deploy, secrets, test, connect agents):
+
+- **Do it yourself:** [docs/setup.md](docs/setup.md), a click-by-click
+  walkthrough assuming no Cloudflare experience, with a troubleshooting
+  table. About 30–45 minutes.
+- **Have your agent do it:** point your coding or computer-use agent at
+  [AGENTS.md](AGENTS.md). It gives the agent the full context, a resumable
+  step-by-step procedure with verification checks, and explicit stop points.
+  The agent asks before creating or deploying anything, and leaves logins,
+  API tokens and secret values to you.
+
+The short version, if you've done this before:
+
+1. Fork. Create the Notion database (schema above) and an internal
+   integration with read access, connected to it.
+2. Create a KV namespace and put its id in `wrangler.toml`.
+3. Deploy with `npx wrangler@4 deploy`, or via GitHub Actions with repo
+   secrets `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` and optionally
+   `BROKER_URL` (enables the post-deploy smoke test).
+4. Set Worker secrets `NOTION_TOKEN`, `QUEUE_DB` (the database id) and
+   `BROKER_KEY` (a long random string). Without `BROKER_KEY` every route is
+   open; only do that for local testing.
+5. `curl <url>/health`, then test with a queued row and
+   `POST /watcher/run-now`.
+
+For local development, put the secrets in a `.dev.vars` file (gitignored)
+and run `npx wrangler@4 dev`.
 
 ## API
 
-All responses are JSON. Every route requires the header `x-broker-key: <key>`
-(the `BROKER_KEY` secret) except the two marked **open**. Without the key a
-gated route answers `401 {"ok":false,"error":"unauthorized"}`.
+All responses are JSON. Routes marked **key** need the header
+`x-broker-key: <BROKER_KEY>`; without it they return `401`.
 
-- `GET /health` — liveness check → `{ok, ts}`. **Open.**
-- `GET /inbox/:agent/peek` — `{ok, agent, count}`: how many messages are
-  waiting, no bodies. **Open.** This is what secret-less pollers call.
-- `GET /inbox/:agent?limit=50` — read an inbox, oldest first →
-  `{ok, agent, count, messages[]}`. Key.
-- `POST /inbox/:agent` — post a message. Body: `{from, type, text}`.
-  Returns `{ok, id}`. Key.
-- `POST /inbox/:agent/ack` — body `{ids: [...]}`; deletes those messages.
-  Returns `{ok, acked}`. Key.
-- `GET /watcher` — last watcher run summary. Key.
-- `POST /watcher/run-now` — trigger a watcher pass immediately (debug). Key.
+| Method | Route | Auth | Returns |
+|---|---|---|---|
+| GET | `/health` | open | `{ok, ts}` |
+| GET | `/inbox/:agent/peek` | open | `{ok, agent, count}`: message count only, no contents |
+| GET | `/inbox/:agent?limit=50` | key | `{ok, agent, count, messages[]}`, oldest first |
+| POST | `/inbox/:agent` | key | Body `{from, type, text}` → `{ok, id}` |
+| POST | `/inbox/:agent/ack` | key | Body `{ids: [...]}` deletes those messages → `{ok, acked}` |
+| GET | `/watcher` | key | Summary of the last watcher run |
+| POST | `/watcher/run-now` | key | Runs the watcher immediately |
 
-Agent names are lowercased (`muse`, `claude`, `gemini`, ...). Inbox messages
-expire after 7 days automatically.
+Agent names are lowercased letters, digits, `-` and `_`. Message text is
+capped at 4,000 characters, and messages expire after 7 days.
 
-## Setup (Andrew)
+## Connecting an agent
 
-1. Sign up at dash.cloudflare.com (free).
-2. **Storage → KV** → create namespace `agent-inbox` and paste its ID into
-   `wrangler.toml` (`[[kv_namespaces]]` block). The first deploy creates the
-   Worker `agent-broker` and binds it.
-3. Worker → Settings → Variables and Secrets → secrets:
-   - `NOTION_TOKEN` — a Notion credential. Either a personal access token
-     (Settings → Connections → develop; simplest, sees everything the account
-     sees), or a token from an internal integration with the Agent Queue
-     database shared to it. Current token: personal access token
-     `agent-broker`, expires 2027-10-02; renewal reminder set for 2027-09-11.
-   - `BROKER_KEY` — any random string (`openssl rand -hex 32`). Provision it
-     to each agent individually through that agent's secure credential
-     mechanism. Without it the broker is open (dev mode only).
-   - `QUEUE_DB` — the Agent Queue database id (the 32-hex id in the
-     database's Notion URL). A secret, not a `[vars]` entry, so this public
-     repo carries no Notion ids. Without it the watcher no-ops.
-4. GitHub repo → Settings → Secrets and variables → Actions → repository
-   secrets: `CLOUDFLARE_API_TOKEN` (My Profile → API Tokens → Create Token →
-   "Edit Cloudflare Workers" template) and `CLOUDFLARE_ACCOUNT_ID` (Workers &
-   Pages overview, right-hand sidebar).
-5. The cron trigger (`*/5 * * * *`) is declared in `wrangler.toml` and applies
-   on deploy. No manual scheduler setup needed.
-6. Send the `workers.dev` URL (or the proxy URL, see Reachability) to each
-   agent.
-
-## Deployment (GitHub Actions)
-
-- Every push to `main` runs `.github/workflows/deploy.yml`: `node --check`,
-  then `npx wrangler@4 deploy`, then a smoke test (`/health` 200,
-  `/inbox/muse` 401 without key, `/inbox/muse/peek` 200).
-- Pull requests run only the syntax check.
-- Re-run on demand: Actions → Deploy → Run workflow.
-- Worker secrets (`NOTION_TOKEN`, `BROKER_KEY`, `QUEUE_DB`) survive deploys.
-  The KV binding and the cron come from `wrangler.toml` and are reapplied on
-  every deploy. Plaintext `[vars]` are not used: `wrangler deploy` replaces
-  them with whatever the file says, so anything sensitive must be a secret.
-- The fastest "is it live?" check is loading
-  `https://agent-broker.andrewjoji71.workers.dev/health` in a browser.
-- **Why not Workers Builds:** it was the original pipeline and failed to
-  initialize three times on 2026-10-02 ("Build failed to initialize and was
-  timed out") with no code change involved. Disconnect it (Worker →
-  Settings → Builds) once the Actions deploy is green so the two do not race.
-  Its gotchas, kept for the record: the production branch must be `main`
-  (it once tracked a leftover `__access_test__` branch); the Domains tab's
-  Production `workers.dev` toggle must be enabled; dashboard "Edit code"
-  deploys overwrite git builds.
-
-## Reachability
-
-`*.workers.dev` URLs are unreachable from networks behind Cloudflare's
-Worker-to-`workers.dev` fetch block (error 1042) — including Muse's VM.
-Agent inbox polling goes through the portfolio proxy instead:
-`https://<portfolio host>/api/agent-broker/...` forwards to the worker
-(see the portfolio repo, `src/app/api/agent-broker/[...path]/route.ts`).
-The proxy is a dumb forwarder: it passes `x-broker-key` through unchanged
-and holds no key of its own. Never give the proxy the key — it is reachable
-by anyone, so that would reopen everything the key closes. As of 2026-10-03
-the proxy is on the `staging` deployment only, not on `main`.
-
-## Agent polling convention
-
-Instead of scanning the whole Notion queue on a timer:
+Each agent runs the same loop, at most every 5 minutes:
 
 ```
-# detector (no secrets, runs every 5+ minutes):
-GET https://<host>/inbox/muse/peek        -> {ok, agent, count}
-count == 0 -> do nothing, zero tokens
-count  > 0 -> wake the real session, which holds the key:
-
-GET  https://<host>/inbox/muse            (x-broker-key: <key>)
--> {messages: [...]}
-... do the work described ...
-POST https://<host>/inbox/muse/ack        (x-broker-key: <key>)  {ids: [...]}
+peek = GET /inbox/<me>/peek              # open, no key, no tokens spent
+if peek.count == 0: do nothing
+else: start a real session, which holds the key:
+      GET  /inbox/<me>         (x-broker-key)   -> messages
+      ... do the work, following docs/protocol.md ...
+      POST /inbox/<me>/ack     (x-broker-key)   {ids: [...]}
 ```
 
-Wake a real session only when `/peek` reports mail. The watcher already
-checked the queue for you; the message lists the waiting rows and priorities.
+The split matters: the cheap detector (a cron job, a hook, a shell loop) can
+run without holding any secret, because `/peek` reveals only a count. Only
+the session that does the work needs the key.
 
-**Poll budget:** `/peek` costs one KV list operation, and the KV free tier
-caps list operations per day (1,000/day at the time of writing, shared by
-every caller). Two agents polling every 5 minutes use ~576/day. Do not poll
-faster than every 5 minutes per agent, and check the cap before adding a
-third poller.
+## Limits
 
-**Authentication:** `BROKER_KEY` is required on everything except `/health`
-and `/inbox/:agent/peek`. The key lives in each agent's secure credential
-store (never in the repo, a Notion page, or a queue row). Hook detector
-scripts must not contain the key — they only call `/peek`.
+Be aware of these before relying on it:
 
-## Local dev
+- **Polling, not push.** Expect minutes of latency, not seconds. Fine for
+  queue work, wrong for anything interactive.
+- **KV free-tier budget.** `/peek` and inbox reads each cost one KV *list*
+  operation, and the free tier caps list operations per day (1,000/day when
+  this was written), shared by every caller. Two agents peeking every
+  5 minutes use about 576/day. A third poller needs a cheaper `/peek` (see
+  Roadmap) or a paid plan.
+- **One shared key.** Every agent holds the same `BROKER_KEY`, so any agent
+  can read any inbox. Fine for agents you trust equally; not a permission
+  model.
+- **Watcher reads, never writes.** It can't tell whether an agent actually
+  picked up the work. Stuck or stale rows are handled by the protocol, not
+  the broker.
+- **Fixed Notion schema.** Property names (`Task`, `Status`, `Owner`,
+  `Priority`) and the `Queued` option are hard-coded in `src/index.js`.
+- **Pinned Notion API.** Uses the database query endpoint with Notion API
+  version `2022-06-28`. Newer Notion API versions change how databases are
+  queried, so this may need updating.
+- **`workers.dev` reachability.** Some networks, including agents that run
+  behind Cloudflare's own egress, can't reach `*.workers.dev` URLs
+  (Cloudflare error 1042). Put the Worker on a custom domain or behind a
+  plain forwarding proxy for those agents. The proxy must pass
+  `x-broker-key` through and never hold the key itself.
+- **First-100 rows.** The watcher reads one page (100 rows) of queued work
+  per run.
 
-No build step — plain JavaScript. Syntax check: `node --check src/index.js`.
+## Roadmap
+
+Roughly in the order I expect to get to them:
+
+- Second agent consumer: an always-on desktop coding-agent session reading
+  its inbox, replacing that agent's scheduled polling.
+- Per-agent keys, so an agent can only read its own inbox.
+- Cheaper `/peek`: a per-agent flag key maintained on post and ack instead of
+  a KV list, which removes the free-tier ceiling on pollers.
+- `since` parameter on inbox reads for incremental fetching.
+- Configurable Notion property names, so the schema isn't hard-coded.
+- More agents (other vendors' CLIs and hosted agents) once the first two are
+  proven.
+
+## Repo layout
+
+| Path | What |
+|---|---|
+| `src/index.js` | The whole Worker: routes, auth, watcher. Plain JavaScript, no build step |
+| `wrangler.toml` | Worker name, KV binding, cron |
+| `.github/workflows/deploy.yml` | Syntax check on PRs; deploy and smoke test on `main` |
+| `docs/setup.md` | Step-by-step setup for people |
+| `AGENTS.md` | Setup and working instructions for an AI agent acting for you |
+| `docs/protocol.md` | The minimal queue protocol agents follow |
+| `DESIGN.md` | Why it is built this way, failure modes, lessons learned |
+
+## License
+
+[MIT](LICENSE).

@@ -1,0 +1,9 @@
+# Local secrets for `wrangler dev` - never commit
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+
+# Tooling
+node_modules/
+.wrangler/
