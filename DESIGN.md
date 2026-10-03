@@ -199,6 +199,11 @@ rows itself (give it a dedicated Notion internal integration in that case).
 - Hook detector scripts must not contain secrets (runtime constraint).
 - The worker is public by URL; treat the URL as semi-private and set
   `BROKER_KEY` before any sensitive use.
+- `BROKER_KEY` enforcement (2026-10-02): required on write routes only
+  (POST/PUT/DELETE); GET routes stay open so secret-less hooks can poll.
+  This blocks fake inbox injections, message deletion, and watcher triggers
+  while keeping the hook working. Key stored in agents' secure vault, never
+  in repo or Notion.
 - This repo is public, which is fine: it contains no secrets (`NOTION_TOKEN`
   lives only as a Cloudflare secret; the IDs in `wrangler.toml` are opaque
   identifiers, not credentials). Keep it that way — never commit tokens or

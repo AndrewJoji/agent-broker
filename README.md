@@ -16,16 +16,19 @@ Cloudflare GitHub integration.
 
 ## API
 
-All responses are JSON. If the `BROKER_KEY` secret is set, every request must
-carry the header `x-broker-key: <key>`.
+All responses are JSON. If the `BROKER_KEY` secret is set, write operations
+(POST/PUT/DELETE) must carry the header `x-broker-key: <key>`. Reads (GET)
+stay open so secret-less pollers can check inboxes.
 
-- `GET /health` — liveness check → `{ok: true}`.
+- `GET /health` — liveness check → `{ok: true}`. Always open.
 - `POST /inbox/:agent` — post a message. Body: `{from, type, text}`.
-  Returns `{ok, id}`.
-- `GET /inbox/:agent?limit=50` — read an inbox, oldest first.
+  Returns `{ok, id}`. Requires key.
+- `GET /inbox/:agent?limit=50` — read an inbox, oldest first. Open.
 - `POST /inbox/:agent/ack` — body `{ids: [...]}`; deletes those messages.
-- `GET /watcher` — last watcher run summary.
+  Requires key.
+- `GET /watcher` — last watcher run summary. Open.
 - `POST /watcher/run-now` — trigger a watcher pass immediately (debug).
+  Requires key.
 
 Agent names are lowercased (`muse`, `claude`, `gemini`, ...). Inbox messages
 expire after 7 days automatically.
@@ -84,6 +87,11 @@ POST https://<worker>/inbox/muse/ack     {ids: [...]}
 
 Wake a real session only when the inbox is non-empty. The watcher already
 checked the queue for you; the message lists the waiting rows and priorities.
+
+**Authentication:** if `BROKER_KEY` is set on the worker, all POST routes
+require header `x-broker-key: <key>`. GET routes stay open. The key lives in
+the agents' secure vault (never in the repo or Notion). Hook detector scripts
+must not contain the key — they only do GETs.
 
 ## Local dev
 
