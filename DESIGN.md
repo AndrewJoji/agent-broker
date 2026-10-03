@@ -204,6 +204,14 @@ rows itself (give it a dedicated Notion internal integration in that case).
   This blocks fake inbox injections, message deletion, and watcher triggers
   while keeping the hook working. Key stored in agents' secure vault, never
   in repo or Notion.
+- Key storage (2026-10-02): Muse holds the key at `~/.broker_key` (600,
+  outside any repo) because the Secure Vault tools are write-only — no
+  read-back for scripted API calls. There is currently no shared cross-agent
+  secret store: each new agent (Claude, future workers) must be provisioned
+  the key individually at setup time by Andrew. Storing the key in Notion was
+  considered and rejected: Notion content is plain text visible to anyone with
+  page/API access, and it would create a circular dependency (broker protects
+  the queue, queue holds the broker's key).
 - This repo is public, which is fine: it contains no secrets (`NOTION_TOKEN`
   lives only as a Cloudflare secret; the IDs in `wrangler.toml` are opaque
   identifiers, not credentials). Keep it that way — never commit tokens or
