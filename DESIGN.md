@@ -67,8 +67,9 @@ Data flow, end to end:
    (one API call, no AI involved) and writes a "work waiting" note into each
    owner's inbox in KV.
 3. Each agent checks **only its own inbox**:
-   - Muse: a hook runs a tiny script (`GET /inbox/muse`) every few minutes.
-     Empty → stays silent, zero tokens. Non-empty → wakes a Muse session.
+   - Muse: a hook runs a tiny script (`GET /inbox/muse/peek`, no key) every
+     5 minutes. Count 0 → stays silent, zero tokens. Count > 0 → wakes a Muse
+     session, which reads the inbox with the key.
    - Future API-billed workers: an even tinier loop, `check inbox → run CLI
      if non-empty → ack`. Zero idle cost, no scheduler needed at all.
    - Claude: same inbox-check pattern on its side, replacing its polling
@@ -97,18 +98,22 @@ Messages expire after 7 days (TTL) so the namespace cannot grow unboundedly.
 
 Routes (`src/index.js`):
 
-| Method | Route | Purpose |
-|---|---|---|
-| GET | `/health` | liveness |
-| POST | `/inbox/:agent` | post `{from, type, text}` → `{ok, id}` |
-| GET | `/inbox/:agent?limit=50` | read inbox, oldest first |
-| POST | `/inbox/:agent/ack` | `{ids:[...]}` deletes messages |
-| GET | `/watcher` | last watcher run summary |
-| POST | `/watcher/run-now` | trigger a watcher pass (debug) |
+| Method | Route | Auth | Purpose |
+|---|---|---|---|
+| GET | `/health` | open | liveness |
+| GET | `/inbox/:agent/peek` | open | `{ok, agent, count}` — count only, no bodies |
+| POST | `/inbox/:agent` | key | post `{from, type, text}` → `{ok, id}` |
+| GET | `/inbox/:agent?limit=50` | key | read inbox, oldest first |
+| POST | `/inbox/:agent/ack` | key | `{ids:[...]}` deletes messages |
+| GET | `/watcher` | key | last watcher run summary |
+| POST | `/watcher/run-now` | key | trigger a watcher pass (debug) |
 
-Auth: if the `BROKER_KEY` secret is set, every request must carry header
-`x-broker-key`. Without it the broker is open (dev mode). Inbox contents are
-task metadata (titles, priorities), never secrets.
+Auth (decided 2026-10-02, shipped 2026-10-03): every route requires header
+`x-broker-key` matching the `BROKER_KEY` secret, except `/health` and
+`/inbox/:agent/peek`. If the secret is unset the broker is open (dev mode
+only). Inbox contents are task metadata (titles, priorities), never secrets,
+but open content reads would let anyone enumerate the team's work; `/peek`
+leaks only a count, which is all a secret-less detector needs.
 
 ### 3.2 Queue watcher (cron)
 
@@ -132,21 +137,27 @@ If `NOTION_TOKEN` is missing the watcher no-ops; the broker routes still work.
 The pattern, per agent:
 
 ```
-loop every N minutes:
-    inbox = GET https://<worker>/inbox/<me>
-    if inbox.messages is empty: do nothing        # zero AI tokens
-    else: wake up / run the worker, do the work,
-          then POST /inbox/<me>/ack {ids:[...]}
+loop every N minutes (N >= 5):
+    peek = GET https://<host>/inbox/<me>/peek     # open, no key, count only
+    if peek.count == 0: do nothing                # zero AI tokens
+    else: wake up / run the worker, which holds the key:
+          GET  /inbox/<me>            (x-broker-key)  -> messages
+          ... do the work ...
+          POST /inbox/<me>/ack        (x-broker-key)  {ids:[...]}
 ```
 
 - **Muse:** implemented as a runtime hook. The hook's detector script is the
   loop above (plain shell + curl, no agent turn). New hooks start disabled;
   inspect `hooks.dry_run` before `hooks.enable`. Hook scripts live under
   `~/hooks/scripts/`, state under `~/hooks/state/`. Hooks have no connector
-  credentials and detectors must not hold secrets — the inbox read needs no
-  secret as long as `BROKER_KEY` is unset or GETs are left open.
-- **Claude:** same pattern adapted to its side (its polling schedule is
-  deleted; only schedules tied to specific recurring work stay).
+  credentials and detectors must not hold secrets — so the detector calls
+  only `/peek`, which needs no key; the woken session reads the mail with
+  the key it holds.
+- **Claude:** per Andrew's decision of 2026-10-02, the consumer is an
+  always-on Claude Code session on the desktop PC (Claude Code Channels),
+  not an API-billed Claude. It polls `/peek` and reads with the key it is
+  provisioned at setup. Claude's Cowork polling schedule is deleted once that
+  session is proven; only schedules tied to specific recurring work stay.
 - **Future workers:** the loop *is* the worker's main. No scheduler at all.
 
 **Reachability constraint (learned 2026-10-02):** `*.workers.dev` URLs are
@@ -157,7 +168,8 @@ normally-reachable address, never the raw `workers.dev` URL, from such
 networks. Current solution: the portfolio site proxies `/api/agent-broker/*`
 to the worker (`src/app/api/agent-broker/[...path]/route.ts` in the
 portfolio repo), so the hook polls
-`https://andrewjoji.com/api/agent-broker/inbox/muse`. A custom domain on the
+`https://<portfolio host>/api/agent-broker/inbox/muse/peek` (the proxy is on
+the `staging` deployment only as of 2026-10-03). A custom domain on the
 worker would also work but requires the domain's DNS to live in Cloudflare;
 andrewjoji.com's DNS is on Vercel, so that option was rejected (do not click
 "Onboard domain" in the worker's Domains tab — it starts moving the whole
@@ -168,9 +180,10 @@ domain's DNS).
 Checklist (this is the whole integration):
 
 1. Pick an agent name (lowercase, e.g. `gemini`). Inbox is `inbox:<name>`.
-2. Implement the inbox loop from 3.3 against `https://<worker>/inbox/<name>`.
-   If `BROKER_KEY` is set, send it as `x-broker-key` (store via the agent's
-   secure credential mechanism, never in code).
+2. Implement the inbox loop from 3.3: poll `https://<host>/inbox/<name>/peek`
+   without a key; read and ack `https://<host>/inbox/<name>` with
+   `x-broker-key` (store the key via the agent's secure credential mechanism,
+   never in code).
 3. Teach it the queue protocol (lives in Notion, "Standing protocol" row):
    claim = `Status=Running` + `Claimed by <agent> <date>` as first Result line;
    never start an already-claimed row; write `Checkpoint` (current step +
@@ -199,11 +212,13 @@ rows itself (give it a dedicated Notion internal integration in that case).
 - Hook detector scripts must not contain secrets (runtime constraint).
 - The worker is public by URL; treat the URL as semi-private and set
   `BROKER_KEY` before any sensitive use.
-- `BROKER_KEY` enforcement (2026-10-02): required on write routes only
-  (POST/PUT/DELETE); GET routes stay open so secret-less hooks can poll.
-  This blocks fake inbox injections, message deletion, and watcher triggers
-  while keeping the hook working. Key stored in agents' secure vault, never
-  in repo or Notion.
+- `BROKER_KEY` enforcement (decided 2026-10-02, shipped 2026-10-03):
+  required on every route except `/health` and `/inbox/:agent/peek`. The
+  earlier interim model (writes only, GETs open) was rejected because open
+  content reads let anyone enumerate the team's work; `/peek` gives
+  secret-less hooks the one bit they need. The key comparison is
+  constant-time. Key stored in each agent's secure credential store, never
+  in repo, Notion, or a queue row.
 - Key storage (2026-10-02): Muse holds the key at `~/.broker_key` (600,
   outside any repo) because the Secure Vault tools are write-only — no
   read-back for scripted API calls. There is currently no shared cross-agent
@@ -212,12 +227,21 @@ rows itself (give it a dedicated Notion internal integration in that case).
   considered and rejected: Notion content is plain text visible to anyone with
   page/API access, and it would create a circular dependency (broker protects
   the queue, queue holds the broker's key).
-- This repo is public, which is fine: it contains no secrets (`NOTION_TOKEN`
-  lives only as a Cloudflare secret; the IDs in `wrangler.toml` are opaque
-  identifiers, not credentials). Keep it that way — never commit tokens or
-  keys. If `BROKER_KEY` is ever enabled on the worker, the portfolio proxy
-  must attach `Authorization: Bearer <key>` from a server-side env var (the
-  hook cannot hold secrets, so the proxy is the right place).
+- This repo is public, which is fine: it contains no secrets (`NOTION_TOKEN`,
+  `BROKER_KEY` and `QUEUE_DB` live only as Cloudflare secrets; the KV
+  namespace id in `wrangler.toml` is an opaque identifier, not a credential).
+  Keep it that way — never commit tokens, keys or Notion ids. The portfolio proxy must **not** hold the key: it is reachable by
+  anyone, so a key attached server-side would reopen every gated route to
+  the public. It forwards `x-broker-key` unchanged; callers that need gated
+  routes send the header themselves, and the hook only calls `/peek`.
+  (The comment at the top of the proxy's `route.ts` still describes the old
+  idea and should be updated.)
+- `QUEUE_DB` (the Agent Queue's Notion database id) was a `[vars]` entry in
+  `wrangler.toml` until 2026-10-03; it is now a Worker secret, because
+  Andrew's condition for keeping this repo public is "no secrets or Notion
+  IDs". The code reads `env.QUEUE_DB` either way. The old value remains in
+  git history; it is an identifier, not a credential, and the database is
+  only reachable with `NOTION_TOKEN`.
 
 ## 6. Failure modes
 
@@ -232,6 +256,8 @@ rows itself (give it a dedicated Notion internal integration in that case).
 | Cloudflare gzips larger worker responses; proxy passed `content-encoding: gzip` through after decompressing | Clients receive plain text labeled as gzip → empty/garbled bodies | When buffering the upstream body (which decompresses), strip both `content-length` and `content-encoding` (learned 2026-10-02: broke `GET /inbox` for an hour) |
 | Workers Builds tracking wrong branch | Pushes to `main` never deploy | Settings → Builds → Branch control: production branch must be `main` (2026-10-02: it was tracking a leftover `__access_test__` branch) |
 | `workers.dev` URL toggle disabled | Worker deployed but URL serves nothing | Domains tab: enable the Production `workers.dev` URL |
+| Workers Builds "Build failed to initialize and was timed out" (3× on 2026-10-02, no code change) | Pushes to `main` never deploy; Worker keeps serving the previous version | Deploys moved to GitHub Actions (`.github/workflows/deploy.yml`, `wrangler deploy` with repo secrets). Disconnect Workers Builds so the two do not race |
+| KV free-tier list budget exhausted (`/peek` and `GET /inbox` each cost one list op; the cap is per day, shared by all callers) | `/peek` and inbox reads fail until the daily reset | Keep every poller at ≥ 5-minute intervals; if a third poller is added, replace the list in `/peek` with a per-agent flag key maintained on post/ack |
 
 Delivery is poll-based throughout: expect minutes of latency, not seconds.
 That is acceptable for queue work.
@@ -252,8 +278,15 @@ are deleted.
       announced to Claude as a high-priority row (standing rule).
 - [ ] Additional workers (Gemini via cron/CLI or managed agents; Codex CLI) —
       deferred until the broker + watcher are proven.
-- [ ] Consider requiring `BROKER_KEY` on POST routes only, leaving GETs open
-      for secret-less hook detectors.
+- [x] Auth model settled: key on everything except `/health` and `/peek`
+      (2026-10-03).
+- [ ] Per-agent keys instead of one shared `BROKER_KEY` (proposed in the
+      Agent Queue; Andrew to decide after Muse's position).
+- [ ] Muse hook detector switched from `GET /inbox/muse` to
+      `GET /inbox/muse/peek`.
+- [ ] Portfolio proxy: fix the stale "attach Authorization server-side"
+      comment in `route.ts`; get the proxy onto `main` when the blog hold
+      lifts.
 - [ ] `GET /inbox/:agent` `since` parameter for incremental reads (currently
       clients track acked IDs instead).
 - [ ] Portfolio repo pipeline (for the `/api/agent-broker` proxy): Vercel

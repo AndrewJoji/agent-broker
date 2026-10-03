@@ -2,17 +2,22 @@
 // Runs as a Cloudflare Worker.
 //
 // KV binding: INBOX  (namespace `agent-inbox`)
-// Secrets:    NOTION_TOKEN (Notion internal integration token, Agent Queue DB shared with it)
-//             BROKER_KEY   (optional shared key; when set, clients must send header x-broker-key)
-// Vars:       QUEUE_DB     (Agent Queue database id)
+// Secrets:    NOTION_TOKEN (Notion token with access to the Agent Queue database)
+//             BROKER_KEY   (shared key; when set, gated routes must send header x-broker-key)
+//             QUEUE_DB     (Agent Queue database id; a secret so the public repo holds no Notion ids)
 //
 // Routes (all JSON):
-//   GET  /health                      -> {ok, ts}
-//   POST /inbox/:agent  {from,type,text} -> store a message, {ok, id}
-//   GET  /inbox/:agent[?limit=N]       -> {ok, agent, count, messages[]}
-//   POST /inbox/:agent/ack {ids:[...]} -> delete messages, {ok, acked}
-//   GET  /watcher                     -> last watcher run summary
-//   POST /watcher/run-now              -> trigger a watcher pass immediately
+//   GET  /health                         -> {ok, ts}                        open
+//   GET  /inbox/:agent/peek              -> {ok, agent, count}              open (count only, no bodies)
+//   GET  /inbox/:agent[?limit=N]         -> {ok, agent, count, messages[]}  key
+//   POST /inbox/:agent  {from,type,text} -> store a message, {ok, id}       key
+//   POST /inbox/:agent/ack {ids:[...]}   -> delete messages, {ok, acked}    key
+//   GET  /watcher                        -> last watcher run summary        key
+//   POST /watcher/run-now                -> trigger a watcher pass now      key
+//
+// Auth model (Andrew, 2026-10-02): every route requires x-broker-key except
+// /health and /inbox/:agent/peek. Secret-less hook detectors poll /peek; the
+// full agent session, which holds the key, reads and acks the mail.
 //
 // Cron (declared in wrangler.toml, every 5 min): queries the Notion Agent Queue
 // for Status=Queued rows and drops a "work waiting" note into each owner's inbox.
@@ -33,9 +38,10 @@ function authorized(req, env) {
   const got = req.headers.get("x-broker-key") || "";
   const want = env.BROKER_KEY;
   if (got.length !== want.length) return false;
-  let same = true;
-  for (let i = 0; i < got.length; i++) same = same && got[i] === want[i];
-  return same;
+  // Constant-time compare: no early exit on the first mismatching character.
+  let diff = 0;
+  for (let i = 0; i < got.length; i++) diff |= got.charCodeAt(i) ^ want.charCodeAt(i);
+  return diff === 0;
 }
 
 function requireKv(env) {
@@ -67,6 +73,16 @@ async function postMessage(req, env, agent) {
     expirationTtl: 7 * 24 * 3600, // inbox messages expire after 7 days
   });
   return json({ ok: true, id });
+}
+
+// Count only, no message bodies. Open on purpose: this is what secret-less
+// hook detectors poll, and a count leaks nothing beyond "there is mail".
+// Costs one KV list operation per call; the KV free tier caps list operations
+// per day (1,000/day at the time of writing), so keep each agent's poll
+// interval at 5 minutes or more.
+async function peekInbox(env, agent) {
+  const list = await env.INBOX.list({ prefix: `inbox:${agent}:`, limit: 1000 });
+  return json({ ok: true, agent, count: list.keys.length });
 }
 
 async function getInbox(env, agent, url) {
@@ -200,20 +216,27 @@ export default {
     } catch (e) {
       return json({ ok: false, error: e.message }, 503);
     }
-    // Auth: writes require BROKER_KEY; reads stay open so secret-less
-    // hooks (which cannot hold credentials) can poll inboxes.
-    if (req.method !== "GET" && req.method !== "HEAD" && !authorized(req, env)) {
+
+    const isHealth = parts.length === 1 && parts[0] === "health";
+    const isPeek =
+      req.method === "GET" && parts.length === 3 && parts[0] === "inbox" && parts[2] === "peek";
+
+    // Auth: every route needs x-broker-key except /health and /peek.
+    if (!isHealth && !isPeek && !authorized(req, env)) {
       return json({ ok: false, error: "unauthorized" }, 401);
     }
 
-    if (parts.length === 1 && parts[0] === "health") {
+    if (isHealth) {
       return json({ ok: true, ts: Date.now() });
     }
     if (parts[0] === "inbox" && parts[1]) {
       const agent = cleanAgent(parts[1]);
+      if (isPeek) return peekInbox(env, agent);
       if (req.method === "POST" && parts.length === 2) return postMessage(req, env, agent);
       if (req.method === "GET" && parts.length === 2) return getInbox(env, agent, url);
-      if (req.method === "POST" && parts[2] === "ack") return ackMessages(req, env, agent);
+      if (req.method === "POST" && parts.length === 3 && parts[2] === "ack") {
+        return ackMessages(req, env, agent);
+      }
     }
     if (parts.length === 1 && parts[0] === "watcher" && req.method === "GET") {
       const raw = await env.INBOX.get("watcher:last-run");
