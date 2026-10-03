@@ -4,7 +4,7 @@
 // KV binding: INBOX  (namespace `agent-inbox`)
 // Secrets:    NOTION_TOKEN (Notion token with access to the Agent Queue database)
 //             BROKER_KEY   (shared key; when set, gated routes must send header x-broker-key)
-// Vars:       QUEUE_DB     (Agent Queue database id)
+//             QUEUE_DB     (Agent Queue database id; a secret so the public repo holds no Notion ids)
 //
 // Routes (all JSON):
 //   GET  /health                         -> {ok, ts}                        open

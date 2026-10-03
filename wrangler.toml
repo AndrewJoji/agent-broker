@@ -2,8 +2,9 @@ name = "agent-broker"
 main = "src/index.js"
 compatibility_date = "2026-10-01"
 
-[vars]
-QUEUE_DB = "762ba07d-0318-4ab0-895a-af6e5f5e3144"
+# No [vars]: QUEUE_DB (the Notion Agent Queue database id) is a Worker secret,
+# set in the dashboard alongside NOTION_TOKEN and BROKER_KEY, so this public
+# repo carries no Notion ids. Secrets survive every `wrangler deploy`.
 
 # KV binding for agent inboxes (namespace `agent-inbox`, created in dashboard).
 [[kv_namespaces]]
