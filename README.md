@@ -52,7 +52,7 @@ The whole thing fits in Cloudflare's free tier.
 | First agent consumer (a secret-less polling hook that wakes a session) | Working, being moved to the `/peek` route |
 | Second agent consumer (an always-on desktop coding-agent session) | Not built yet |
 | Per-agent keys | Not built; one shared key today |
-| Tests | None beyond a syntax check and a post-deploy smoke test |
+| Tests | A syntax check, a small `/peek` unit test (`node --test test/`), and a post-deploy smoke test |
 
 ## How it works with Notion
 
@@ -111,7 +111,7 @@ All responses are JSON. Routes marked **key** need the header
 | Method | Route | Auth | Returns |
 |---|---|---|---|
 | GET | `/health` | open | `{ok, ts}` |
-| GET | `/inbox/:agent/peek` | open | `{ok, agent, count}`: message count only, no contents |
+| GET | `/inbox/:agent/peek` | open | `{ok, agent, count}`: `count` is 1 if mail is pending, else 0 (read from a per-agent flag, no list); no contents |
 | GET | `/inbox/:agent?limit=50` | key | `{ok, agent, count, messages[]}`, oldest first |
 | POST | `/inbox/:agent` | key | Body `{from, type, text}` → `{ok, id}` |
 | POST | `/inbox/:agent/ack` | key | Body `{ids: [...]}` deletes those messages → `{ok, acked}` |
@@ -144,11 +144,12 @@ Be aware of these before relying on it:
 
 - **Polling, not push.** Expect minutes of latency, not seconds. Fine for
   queue work, wrong for anything interactive.
-- **KV free-tier budget.** `/peek` and inbox reads each cost one KV *list*
-  operation, and the free tier caps list operations per day (1,000/day when
-  this was written), shared by every caller. Two agents peeking every
-  5 minutes use about 576/day. A third poller needs a cheaper `/peek` (see
-  Roadmap) or a paid plan.
+- **KV free-tier budget.** `/peek` reads a per-agent `pending:<agent>` flag
+  (one KV *get*, no list), set on post and cleared by an ack that leaves the
+  inbox empty, so pollers no longer consume the free tier's list-operation
+  cap (1,000/day when this was written). Inbox reads and acks still cost one
+  list each, which is fine because they are rare. `/peek` `count` is 0 or 1,
+  not a true message count.
 - **One shared key.** Every agent holds the same `BROKER_KEY`, so any agent
   can read any inbox. Fine for agents you trust equally; not a permission
   model.
@@ -175,8 +176,6 @@ Roughly in the order I expect to get to them:
 - Second agent consumer: an always-on desktop coding-agent session reading
   its inbox, replacing that agent's scheduled polling.
 - Per-agent keys, so an agent can only read its own inbox.
-- Cheaper `/peek`: a per-agent flag key maintained on post and ack instead of
-  a KV list, which removes the free-tier ceiling on pollers.
 - `since` parameter on inbox reads for incremental fetching.
 - Configurable Notion property names, so the schema isn't hard-coded.
 - More agents (other vendors' CLIs and hosted agents) once the first two are

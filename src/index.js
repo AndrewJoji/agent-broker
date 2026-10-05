@@ -8,7 +8,7 @@
 //
 // Routes (all JSON):
 //   GET  /health                         -> {ok, ts}                        open
-//   GET  /inbox/:agent/peek              -> {ok, agent, count}              open (count only, no bodies)
+//   GET  /inbox/:agent/peek              -> {ok, agent, count}              open (count is 0 or 1, no bodies)
 //   GET  /inbox/:agent[?limit=N]         -> {ok, agent, count, messages[]}  key
 //   POST /inbox/:agent  {from,type,text} -> store a message, {ok, id}       key
 //   POST /inbox/:agent/ack {ids:[...]}   -> delete messages, {ok, acked}    key
@@ -49,6 +49,12 @@ function requireKv(env) {
 }
 
 const inboxKey = (agent, id) => `inbox:${agent}:${id}`;
+const pendingKey = (agent) => `pending:${agent}`;
+const INBOX_TTL = 7 * 24 * 3600; // inbox messages (and the pending flag) expire after 7 days
+
+// Per-agent "has mail" flag so /peek needs one KV get instead of a list.
+// Rewritten on every post, so its TTL always outlasts the newest message.
+const setPending = (env, agent) => env.INBOX.put(pendingKey(agent), "1", { expirationTtl: INBOX_TTL });
 const newId = () => `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 const cleanAgent = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 32) || "unknown";
 
@@ -70,19 +76,20 @@ async function postMessage(req, env, agent) {
     ts: Date.now(),
   };
   await env.INBOX.put(inboxKey(agent, id), JSON.stringify(msg), {
-    expirationTtl: 7 * 24 * 3600, // inbox messages expire after 7 days
+    expirationTtl: INBOX_TTL,
   });
+  await setPending(env, agent);
   return json({ ok: true, id });
 }
 
-// Count only, no message bodies. Open on purpose: this is what secret-less
-// hook detectors poll, and a count leaks nothing beyond "there is mail".
-// Costs one KV list operation per call; the KV free tier caps list operations
-// per day (1,000/day at the time of writing), so keep each agent's poll
-// interval at 5 minutes or more.
+// Open on purpose: this is what secret-less hook detectors poll, and
+// "there is mail" is all it reveals. Reads only the per-agent pending flag
+// (one KV get, never a list), so polling does not touch the KV list-operation
+// cap. Without a list there is no true count: count is 1 when mail is pending
+// and 0 otherwise, which keeps `count == 0` checks working unchanged.
 async function peekInbox(env, agent) {
-  const list = await env.INBOX.list({ prefix: `inbox:${agent}:`, limit: 1000 });
-  return json({ ok: true, agent, count: list.keys.length });
+  const pending = await env.INBOX.get(pendingKey(agent));
+  return json({ ok: true, agent, count: pending ? 1 : 0 });
 }
 
 async function getInbox(env, agent, url) {
@@ -120,6 +127,10 @@ async function ackMessages(req, env, agent) {
       acked++;
     }
   }
+  // Clear the pending flag once the inbox is empty. One list per ack is fine:
+  // acks are rare, unlike peeks.
+  const left = await env.INBOX.list({ prefix: `inbox:${agent}:`, limit: 1 });
+  if (left.keys.length === 0) await env.INBOX.delete(pendingKey(agent));
   return json({ ok: true, acked });
 }
 
@@ -186,8 +197,9 @@ async function runWatcher(env) {
           text: `${rows.length} queued row(s) waiting:\n${lines.join("\n")}`.slice(0, 4000),
           ts: Date.now(),
         }),
-        { expirationTtl: 7 * 24 * 3600 }
+        { expirationTtl: INBOX_TTL }
       );
+      await setPending(env, agent);
       for (const r of rows) notified[r.id] = Date.now();
       summary.notified.push({ owner, count: rows.length });
     }

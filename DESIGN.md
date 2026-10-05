@@ -161,7 +161,7 @@ credential. Forks replace it with their own.
 | Agent dies mid-task | Row stays `Running` | Protocol-level: stale-claim rule and checkpoints (see protocol doc) |
 | Agent's network can't reach `*.workers.dev` (Cloudflare error 1042) | Polls fail; the agent never wakes | Use a custom domain or a forwarding proxy; never depend on the raw `workers.dev` URL from restricted networks |
 | Proxy decompresses the body but forwards `content-encoding: gzip` | Clients get plain text labelled gzip: empty or garbled bodies | When buffering an upstream body, strip `content-length` and `content-encoding` |
-| KV list budget exhausted | `/peek` and inbox reads fail until the daily reset | Keep pollers at ≥ 5-minute intervals; replace the list in `/peek` with a per-agent flag key |
+| KV list budget exhausted | `/peek` and inbox reads fail until the daily reset | Fixed: `/peek` reads a per-agent `pending:<agent>` flag (one get, no list), so polling no longer spends list operations. Keep pollers at ≥ 5-minute intervals anyway |
 | Cloudflare Workers Builds failed to start, repeatedly, with no code change | Pushes never deployed | Deploys moved to GitHub Actions running `wrangler deploy`. If you use Workers Builds instead, check the production branch is `main` and the `workers.dev` route is enabled, and don't run both pipelines at once |
 | Dashboard "Edit code" used on a git-deployed Worker | The next deploy silently overwrites it, or it overwrites the deploy | Treat the repo as the only source of the Worker's code |
 
@@ -171,10 +171,11 @@ Delivery is poll-based throughout: expect minutes of latency, not seconds.
 
 Before: hundreds of polling sessions a day across agents, almost all of
 them finding nothing.
-After: polling costs one KV operation per check and zero tokens; sessions
-start only for real work. Everything runs inside Cloudflare's free tier at
-two pollers (see the KV budget limit in the README for when that stops
-being true).
+After: polling costs one KV get per check (the per-agent `pending:<agent>`
+flag, set on post and cleared when an ack empties the inbox) and zero tokens;
+sessions start only for real work. List operations happen only in inbox reads
+and acks, which are rare, so polling no longer eats the free tier's daily
+list cap.
 
 ## 8. Open questions
 
