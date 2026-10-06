@@ -33,6 +33,10 @@ jobs:
           node-version: 22
       - name: Syntax check
         run: node --check src/index.js
+      # A positional argument to `node --test` is a file path or glob, not a
+      # directory, so `node --test test/` fails on Node 22 with MODULE_NOT_FOUND.
+      - name: Unit tests
+        run: node --test 'test/**/*.test.mjs'
 
   deploy:
     needs: check
@@ -66,5 +70,7 @@ jobs:
           echo
           code=$(curl -s -o /dev/null -w '%{http_code}' "$BROKER_URL/inbox/smoke-test")
           test "$code" = "401" || { echo "expected 401 on GET /inbox/smoke-test without key, got $code"; exit 1; }
-          curl -sSf "$BROKER_URL/inbox/smoke-test/peek"
-          echo
+          # /peek is a single KV get on the pending flag; post/ack paths need the
+          # key (not available to CI) and are covered by test/peek.test.mjs.
+          curl -sSf "$BROKER_URL/inbox/smoke-test/peek" | grep -q '"count":[01]}' || { echo "unexpected /peek response"; exit 1; }
+          echo "peek ok"
