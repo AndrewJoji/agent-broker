@@ -33,8 +33,10 @@ jobs:
           node-version: 22
       - name: Syntax check
         run: node --check src/index.js
+      # A positional argument to `node --test` is a file path or glob, not a
+      # directory, so `node --test test/` fails on Node 22 with MODULE_NOT_FOUND.
       - name: Unit tests
-        run: node --test test/
+        run: node --test 'test/**/*.test.mjs'
 
   deploy:
     needs: check

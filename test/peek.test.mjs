@@ -1,4 +1,4 @@
-// Run with: node --test test/
+// Run with: node --test 'test/**/*.test.mjs'
 // Exercises the pending-flag behaviour of /peek against an in-memory KV.
 import { test } from "node:test";
 import assert from "node:assert/strict";
