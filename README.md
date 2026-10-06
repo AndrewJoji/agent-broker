@@ -52,7 +52,7 @@ The whole thing fits in Cloudflare's free tier.
 | First agent consumer (a secret-less polling hook that wakes a session) | Working, being moved to the `/peek` route |
 | Second agent consumer (an always-on desktop coding-agent session) | Not built yet |
 | Per-agent keys | Not built; one shared key today |
-| Tests | A syntax check, a small `/peek` unit test (`node --test test/`), and a post-deploy smoke test |
+| Tests | A syntax check, a small `/peek` unit test (`node --test 'test/**/*.test.mjs'`), and a post-deploy smoke test |
 
 ## How it works with Notion
 
