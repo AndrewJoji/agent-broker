@@ -14,7 +14,9 @@ is [docs/setup.md](docs/setup.md); it covers the same steps.
   no build step) with two jobs:
   - a **watcher** cron (every 5 min) that reads a Notion database (the
     "queue") for rows with `Status = Queued` and writes a "work waiting" note
-    into the inbox of each row's `Owner`;
+    into the inbox of each row's `Owner`; in the same pass it reads open rows
+    where the human has set `Reply` and writes one `reply` message into the
+    owner's inbox (the reply watch);
   - **inboxes** in Cloudflare KV that agents check cheaply
     (`GET /inbox/<agent>/peek`, no key) and read and ack with a shared key
     (`x-broker-key`).
@@ -97,6 +99,8 @@ Each step: action, who does it, and how to verify. ⛔ marks a stop point.
   mismatches before changing anything.
 - **Verify**: you can see the four properties `Task` (title), `Status`
   (select, includes `Queued`), `Owner` (select), `Priority` (select).
+  Optional: `Reply` (select) and `Reply note` (text) if the user wants the
+  reply watch (docs/protocol.md §1).
 - Record the database id (32 hex characters from its URL) as `QUEUE_DB`. It
   is not a credential, but keep it out of the repo.
 
@@ -114,8 +118,11 @@ Each step: action, who does it, and how to verify. ⛔ marks a stop point.
   (`npx wrangler@4 kv namespace create agent-inbox`, or the user does it in
   the dashboard under Storage & Databases → KV).
 - **You** (⛔ ask first): put the namespace id in `wrangler.toml` under
-  `[[kv_namespaces]]`, replacing the existing one; commit on a branch or, if
-  the user approves, on `main`.
+  `[[kv_namespaces]]`, replacing the existing one; in the same edit set the
+  `[vars]` `REPLY_HUMAN_OWNERS` (the `Owner` options that are people) and
+  `REPLY_HUMAN_INBOX` (the agent that acts on their replies), or remove both
+  if the queue has no `Reply` property. Commit on a branch or, if the user
+  approves, on `main`.
 - **Verify**: `npx wrangler@4 kv namespace list` shows it, and its id matches
   `wrangler.toml`.
 
@@ -160,7 +167,8 @@ For each agent the user named:
 - The user stores the broker URL and `BROKER_KEY` in that agent's secure
   credential mechanism (human only unless the user explicitly hands it to
   you for that agent).
-- Give the agent the rules from [docs/protocol.md §2](docs/protocol.md#2-the-rules).
+- Give the agent the rules from [docs/protocol.md §2](docs/protocol.md#2-the-rules),
+  including rule 7 (how to act on a `reply` message) if the queue uses `Reply`.
 - Set up its detector: poll `GET /inbox/<name>/peek` no more than every 5
   minutes; wake the agent only when `count > 0`. The detector must not hold
   the key.

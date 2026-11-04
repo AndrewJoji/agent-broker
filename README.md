@@ -26,7 +26,10 @@ One Worker, two jobs:
 
 1. **Queue watcher (cron, every 5 minutes).** Plain code, zero AI tokens.
    It queries the Notion queue for rows with `Status = Queued`, groups them
-   by `Owner`, and drops a "work waiting" note into each owner's inbox.
+   by `Owner`, and drops a "work waiting" note into each owner's inbox. In
+   the same pass it looks for open rows where the human has set `Reply`
+   and drops one "reply" message into the owner's inbox, so an answer is
+   picked up within minutes instead of at the owner's next scheduled poll.
 2. **Inboxes (HTTP).** Every agent has an inbox in Cloudflare KV. Agents
    check theirs with one cheap request and only wake a real session when
    there is mail. Any agent holding the key can also message any other agent
@@ -56,7 +59,7 @@ The whole thing fits in Cloudflare's free tier.
 
 ## How it works with Notion
 
-The watcher reads four properties from your queue database. Everything else
+The watcher reads these properties from your queue database. Everything else
 in the database is up to you.
 
 | Property | Notion type | Used for |
@@ -65,9 +68,23 @@ in the database is up to you.
 | `Status` | **Select** (not Notion's built-in *Status* type) | Watcher looks for the option `Queued` |
 | `Owner` | Select | Which inbox gets the note. Lowercased, so `Claude` goes to inbox `claude` |
 | `Priority` | Select (optional) | Shown in the inbox note |
+| `Reply` | Select (optional) | Reply watch: a set value on an open row (not `Done`, `Cancelled` or `Failed`) sends a `reply` message to the owner |
+| `Reply note` | Text (optional) | Reply watch: a changed note counts as a new reply. Its text is never copied into the message |
 
 Rows with no `Owner` are skipped. Each queued row is announced once; if it
 leaves `Queued` and comes back, it is announced again.
+
+Each reply is announced once per row, value and note: the owner editing the
+row afterwards does not re-notify, a changed value or note does, and a reply
+that is cleared and set again later does. A reply on a row owned by a human
+(no agent polls those) goes to the inbox named in `REPLY_HUMAN_INBOX`; see
+the quickstart. The message is data only:
+
+```json
+{"type":"reply","row":"https://www.notion.so/<page id>","task":"<title>","reply":"<Reply value>"}
+```
+
+The receiving agent opens the row to read the note and act on it.
 
 The minimal protocol for how agents claim and finish rows, plus the full set
 of suggested properties, is in [docs/protocol.md](docs/protocol.md).
@@ -97,6 +114,10 @@ The short version, if you've done this before:
 4. Set Worker secrets `NOTION_TOKEN`, `QUEUE_DB` (the database id) and
    `BROKER_KEY` (a long random string). Without `BROKER_KEY` every route is
    open; only do that for local testing.
+   Optional, in `wrangler.toml` `[vars]` (not secrets): `REPLY_HUMAN_OWNERS`
+   (comma-separated `Owner` names that are people) and `REPLY_HUMAN_INBOX`
+   (the agent that acts on their replies). Without them, a reply on a
+   human-owned row is logged in the watcher summary and sent nowhere.
 5. `curl <url>/health`, then test with a queued row and
    `POST /watcher/run-now`.
 
@@ -115,11 +136,13 @@ All responses are JSON. Routes marked **key** need the header
 | GET | `/inbox/:agent?limit=50` | key | `{ok, agent, count, messages[]}`, oldest first |
 | POST | `/inbox/:agent` | key | Body `{from, type, text}` → `{ok, id}` |
 | POST | `/inbox/:agent/ack` | key | Body `{ids: [...]}` deletes those messages → `{ok, acked}` |
-| GET | `/watcher` | key | Summary of the last watcher run |
+| GET | `/watcher` | key | Summary of the last watcher run (`checked`, `notified`, `repliesChecked`, `replies`, `errors`) |
 | POST | `/watcher/run-now` | key | Runs the watcher immediately |
 
 Agent names are lowercased letters, digits, `-` and `_`. Message text is
-capped at 4,000 characters, and messages expire after 7 days.
+capped at 4,000 characters, and messages expire after 7 days. Messages the
+watcher writes have `from: "watcher"` and `type` `queue` (rows waiting) or
+`reply` (the human answered a row; `text` is the JSON shown above).
 
 ## Connecting an agent
 
@@ -157,7 +180,8 @@ Be aware of these before relying on it:
   picked up the work. Stuck or stale rows are handled by the protocol, not
   the broker.
 - **Fixed Notion schema.** Property names (`Task`, `Status`, `Owner`,
-  `Priority`) and the `Queued` option are hard-coded in `src/index.js`.
+  `Priority`, `Reply`, `Reply note`), the `Queued` option and the closed
+  statuses (`Done`, `Cancelled`, `Failed`) are hard-coded in `src/index.js`.
 - **Pinned Notion API.** Uses the database query endpoint with Notion API
   version `2022-06-28`. Newer Notion API versions change how databases are
   queried, so this may need updating.
@@ -167,7 +191,7 @@ Be aware of these before relying on it:
   plain forwarding proxy for those agents. The proxy must pass
   `x-broker-key` through and never hold the key itself.
 - **First-100 rows.** The watcher reads one page (100 rows) of queued work
-  per run.
+  and one page of open replied rows per run.
 
 ## Roadmap
 
@@ -186,7 +210,7 @@ Roughly in the order I expect to get to them:
 | Path | What |
 |---|---|
 | `src/index.js` | The whole Worker: routes, auth, watcher. Plain JavaScript, no build step |
-| `wrangler.toml` | Worker name, KV binding, cron |
+| `wrangler.toml` | Worker name, KV binding, cron, reply-watch settings |
 | `.github/workflows/deploy.yml` | Syntax check on PRs; deploy and smoke test on `main` |
 | `docs/setup.md` | Step-by-step setup for people |
 | `AGENTS.md` | Setup and working instructions for an AI agent acting for you |

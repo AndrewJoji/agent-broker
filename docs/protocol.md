@@ -25,6 +25,8 @@ A Notion database with these properties:
 | `Priority` | Select | `High`, `Normal`, `Low` |
 | `Instructions` | Text | Everything the agent needs to do the task without asking |
 | `Result` | Text | Written by the agent: claim line, then the outcome |
+| `Reply` | Select (optional) | For the human: `Yes`, `No`, `Other option`, `See note`. Setting it on an open row wakes the owner (reply watch) |
+| `Reply note` | Text (optional) | The human's short note to go with `Reply` |
 
 Use a **Select** for `Status`, not Notion's built-in *Status* property type:
 the broker filters on a select.
@@ -52,6 +54,14 @@ Put these in every agent's instructions.
    `Instructions`. Hand over a short context packet, not a transcript.
 6. **Ack your inbox after acting.** Once you have handled what a broker
    message pointed you to, ack that message so it is not delivered again.
+7. **Act on replies.** A message with `type: "reply"` means the human
+   answered the row named in its `text` (`{"type":"reply","row":…,
+   "task":…,"reply":…}`). Open the row, read `Reply` and `Reply note`
+   there (the message never carries the note), do what the answer asks,
+   write what you did in `Result`, then clear `Reply` and `Reply note` (or
+   set a new ask if something is still open). A reply on a row owned by a
+   human is delivered to the agent configured in `REPLY_HUMAN_INBOX`; that
+   agent handles it the same way.
 
 ## 3. Try it
 

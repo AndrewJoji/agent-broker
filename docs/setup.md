@@ -25,7 +25,7 @@ account, and Node.js 18 or newer if you want to deploy from your own machine.
 1. Create a new full-page **database** (table). Name it whatever you like,
    e.g. "Agent Queue".
 2. Add the properties from [protocol.md](protocol.md#1-create-the-database).
-   The broker itself only reads four of them:
+   The broker itself only reads these:
    - `Task`: the title property (rename the default "Name").
    - `Status`: type **Select** with options `Queued`, `Running`, `Done`,
      `Failed`, `Needs approval`. Do *not* use Notion's built-in *Status*
@@ -33,6 +33,10 @@ account, and Node.js 18 or newer if you want to deploy from your own machine.
    - `Owner`: type **Select**, one option per agent (e.g. `claude`, `muse`),
      plus one for you. Option names become inbox names, lowercased.
    - `Priority`: type **Select** with `High`, `Normal`, `Low`.
+   - Optional, for the reply watch: `Reply` (type **Select**, e.g. `Yes`,
+     `No`, `Other option`, `See note`) and `Reply note` (type **Text**).
+     Without a `Reply` property the watcher's reply pass reports an error
+     each run (the queued pass still works), so add it or ignore that line.
 3. Copy the database id: open the database as a full page, copy its URL, and
    take the 32-character string before any `?`. That is your `QUEUE_DB`.
 
@@ -54,7 +58,11 @@ account, and Node.js 18 or newer if you want to deploy from your own machine.
 3. Create the inbox storage: **Storage & Databases → KV → Create a
    namespace**, name it `agent-inbox`. Copy its **ID**.
 4. In your fork, open `wrangler.toml` and replace the `id` under
-   `[[kv_namespaces]]` with yours. Commit the change.
+   `[[kv_namespaces]]` with yours. In the same file, under `[vars]`, set
+   `REPLY_HUMAN_OWNERS` to the `Owner` option(s) that are people (comma
+   separated) and `REPLY_HUMAN_INBOX` to the agent that should act on their
+   replies, or remove both lines if you do not use `Reply`. These are plain
+   settings, not secrets. Commit the change.
 5. Pick your workers.dev subdomain if prompted (Workers & Pages → Overview).
    Your Worker will live at `https://agent-broker.<subdomain>.workers.dev`.
 
@@ -160,6 +168,8 @@ comfortably; check the README's Limits section before adding a third.
 | Watcher error `notion query failed: 404` | Wrong `QUEUE_DB`, or the integration isn't connected to the database (step 3.3) |
 | Watcher error `notion query failed: 400` | `Status` is Notion's *Status* type instead of a *Select* |
 | Watcher runs but `checked: 0` | No rows have `Status` exactly `Queued` |
+| Watcher error `replies: notion query failed: 400` | The database has no `Reply` select property (step 2.2); the queued pass still runs |
+| A reply was set but nobody was notified | The row is `Done`, `Cancelled` or `Failed`; or it is owned by a person and `REPLY_HUMAN_INBOX` is not set in `wrangler.toml` (the watcher summary says `no routable Owner`) |
 | Rows checked but nothing notified | Rows have no `Owner`, or were already announced (they're announced once per time they enter `Queued`) |
 | An agent can't reach the Worker (Cloudflare error 1042) | Its network blocks `*.workers.dev`; use a custom domain or a forwarding proxy (README, Limits) |
 | Actions deploy fails on auth | `CLOUDFLARE_API_TOKEN` lacks Workers permissions, or `CLOUDFLARE_ACCOUNT_ID` is wrong |
