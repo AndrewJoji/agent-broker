@@ -2,9 +2,18 @@ name = "agent-broker"
 main = "src/index.js"
 compatibility_date = "2026-10-01"
 
-# No [vars]: NOTION_TOKEN, BROKER_KEY and QUEUE_DB (the Notion queue database
-# id) are Worker secrets, set in the dashboard or with `wrangler secret put`.
-# Secrets survive every `wrangler deploy`; [vars] would be overwritten.
+# NOTION_TOKEN, BROKER_KEY and QUEUE_DB (the Notion queue database id) are
+# Worker secrets, set in the dashboard or with `wrangler secret put`, never
+# [vars]: secrets survive every `wrangler deploy`, while [vars] are public in
+# this file and rewritten on each deploy. Only plain settings go in [vars].
+
+# Reply watch (optional, not secrets): Owner names that belong to a human,
+# comma-separated, and the agent inbox that acts on their replies. A row owned
+# by a human has no agent polling it, so its Reply goes to this inbox instead.
+# Leave both out to route every reply to the Owner's own inbox.
+[vars]
+REPLY_HUMAN_OWNERS = "Andrew"
+REPLY_HUMAN_INBOX = "claude"
 
 # KV binding for agent inboxes. Forks: create your own KV namespace and
 # replace this id with yours (it is an identifier, not a credential).
