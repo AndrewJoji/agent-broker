@@ -23,6 +23,14 @@
 // for Status=Queued rows and drops a "work waiting" note into each owner's inbox.
 // Agents poll their own inbox (one tiny KV read) instead of waking a full
 // session to scan the queue.
+//
+// Reply watch (same cron): rows where the human has set the `Reply` select and
+// the row is not Done / Cancelled / Failed get one `type: "reply"` message in
+// the Owner's inbox, so the owner acts within a cycle instead of at its next
+// scheduled poll. Rows owned by a human (REPLY_HUMAN_OWNERS, comma-separated
+// Owner names, optional [vars]) are routed to REPLY_HUMAN_INBOX, the agent that
+// handles replies on the human's behalf. The message carries data only: the
+// row URL, its title and the Reply value, never the Reply note.
 
 const NOTION_VERSION = "2022-06-28";
 
@@ -158,59 +166,174 @@ async function notionQuery(env, filter) {
   return res.json();
 }
 
-async function runWatcher(env) {
-  const summary = { ok: true, started: Date.now(), checked: 0, notified: [], errors: [] };
+const CLOSED_STATUSES = ["Done", "Cancelled", "Failed"];
+
+// Rows whose Reply is set and that are still open. Notion ANDs the filters.
+const replyFilter = () => ({
+  and: [
+    { property: "Reply", select: { is_not_empty: true } },
+    ...CLOSED_STATUSES.map((s) => ({ property: "Status", select: { does_not_equal: s } })),
+  ],
+});
+
+// Owner names that belong to a human, and the agent inbox that handles their
+// replies. Read from env (wrangler.toml [vars]) so a fork sets its own.
+function humanOwners(env) {
+  return String(env.REPLY_HUMAN_OWNERS || "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+// Which inbox a reply on this row goes to. Exported for tests.
+export function replyInbox(owner, env) {
+  if (!owner) return null;
+  const name = String(owner).trim().toLowerCase();
+  if (humanOwners(env).includes(name)) {
+    const fallback = cleanAgent(env.REPLY_HUMAN_INBOX);
+    return fallback === "unknown" ? null : fallback;
+  }
+  return cleanAgent(owner);
+}
+
+// Fingerprint of a reply: the same row with the same Reply and note is one
+// reply; a changed value or note is a new one. The page's last_edited_time is
+// deliberately not used, because the Owner edits Result while acting on the
+// reply and that must not re-notify. Exported for tests.
+export function replyFingerprint(reply, note) {
+  return `${reply || ""}\u0000${note || ""}`;
+}
+
+async function watchQueued(env, summary) {
+  const data = await notionQuery(env, { property: "Status", select: { equals: "Queued" } });
+  const results = data.results || [];
+  summary.checked = results.length;
+
+  let notified = {};
   try {
-    const data = await notionQuery(env, { property: "Status", select: { equals: "Queued" } });
-    const results = data.results || [];
-    summary.checked = results.length;
+    notified = JSON.parse((await env.INBOX.get("watcher:notified")) || "{}");
+  } catch {
+    notified = {};
+  }
 
-    let notified = {};
-    try {
-      notified = JSON.parse((await env.INBOX.get("watcher:notified")) || "{}");
-    } catch {
-      notified = {};
-    }
+  const stillQueued = new Set();
+  const byOwner = {};
+  for (const page of results) {
+    const p = page.properties || {};
+    stillQueued.add(page.id);
+    const owner = selectName(p.Owner);
+    if (!owner || notified[page.id]) continue;
+    const priority = selectName(p.Priority);
+    const title = p.Task && p.Task.title ? plainText(p.Task.title) : "(untitled)";
+    (byOwner[owner] = byOwner[owner] || []).push({ id: page.id, title, priority });
+  }
 
-    const stillQueued = new Set();
-    const byOwner = {};
-    for (const page of results) {
-      const p = page.properties || {};
-      stillQueued.add(page.id);
-      const owner = selectName(p.Owner);
-      if (!owner || notified[page.id]) continue;
-      const priority = selectName(p.Priority);
-      const title = p.Task && p.Task.title ? plainText(p.Task.title) : "(untitled)";
-      (byOwner[owner] = byOwner[owner] || []).push({ id: page.id, title, priority });
-    }
+  for (const [owner, rows] of Object.entries(byOwner)) {
+    const agent = cleanAgent(owner);
+    const lines = rows.map((r) => `- [${r.priority || "?"}] ${r.title}`.slice(0, 200));
+    const id = newId();
+    await env.INBOX.put(
+      inboxKey(agent, id),
+      JSON.stringify({
+        id,
+        from: "watcher",
+        type: "queue",
+        text: `${rows.length} queued row(s) waiting:\n${lines.join("\n")}`.slice(0, 4000),
+        ts: Date.now(),
+      }),
+      { expirationTtl: INBOX_TTL }
+    );
+    await setPending(env, agent);
+    for (const r of rows) notified[r.id] = Date.now();
+    summary.notified.push({ owner, count: rows.length });
+  }
 
-    for (const [owner, rows] of Object.entries(byOwner)) {
-      const agent = cleanAgent(owner);
-      const lines = rows.map((r) => `- [${r.priority || "?"}] ${r.title}`.slice(0, 200));
-      const id = newId();
-      await env.INBOX.put(
-        inboxKey(agent, id),
-        JSON.stringify({
-          id,
-          from: "watcher",
-          type: "queue",
-          text: `${rows.length} queued row(s) waiting:\n${lines.join("\n")}`.slice(0, 4000),
-          ts: Date.now(),
-        }),
-        { expirationTtl: INBOX_TTL }
-      );
-      await setPending(env, agent);
-      for (const r of rows) notified[r.id] = Date.now();
-      summary.notified.push({ owner, count: rows.length });
-    }
+  for (const id of Object.keys(notified)) {
+    if (!stillQueued.has(id)) delete notified[id];
+  }
+  await env.INBOX.put("watcher:notified", JSON.stringify(notified));
+}
 
-    for (const id of Object.keys(notified)) {
-      if (!stillQueued.has(id)) delete notified[id];
+// One message per new reply, to the Owner's inbox. Dedupe state lives in
+// KV under watcher:replies as {pageId: fingerprint}; entries for rows that
+// no longer carry a Reply (the Owner cleared it) or that closed are dropped,
+// so the same Reply set again later counts as new.
+async function watchReplies(env, summary) {
+  const data = await notionQuery(env, replyFilter());
+  const results = data.results || [];
+  summary.repliesChecked = results.length;
+
+  let seen = {};
+  try {
+    seen = JSON.parse((await env.INBOX.get("watcher:replies")) || "{}");
+  } catch {
+    seen = {};
+  }
+
+  const open = new Set();
+  const counts = {};
+  for (const page of results) {
+    const p = page.properties || {};
+    open.add(page.id);
+    const reply = selectName(p.Reply);
+    if (!reply) continue;
+    const note = p["Reply note"] && p["Reply note"].rich_text ? plainText(p["Reply note"].rich_text) : "";
+    const fp = replyFingerprint(reply, note);
+    if (seen[page.id] === fp) continue;
+    const owner = selectName(p.Owner);
+    const agent = replyInbox(owner, env);
+    if (!agent) {
+      summary.errors.push(`reply on ${page.id} has no routable Owner`);
+      seen[page.id] = fp; // do not report it every cycle
+      continue;
     }
-    await env.INBOX.put("watcher:notified", JSON.stringify(notified));
+    const title = p.Task && p.Task.title ? plainText(p.Task.title) : "(untitled)";
+    const id = newId();
+    await env.INBOX.put(
+      inboxKey(agent, id),
+      JSON.stringify({
+        id,
+        from: "watcher",
+        type: "reply",
+        text: JSON.stringify({ type: "reply", row: page.url || page.id, task: title.slice(0, 200), reply }),
+        ts: Date.now(),
+      }),
+      { expirationTtl: INBOX_TTL }
+    );
+    await setPending(env, agent);
+    seen[page.id] = fp;
+    counts[agent] = (counts[agent] || 0) + 1;
+  }
+
+  for (const id of Object.keys(seen)) {
+    if (!open.has(id)) delete seen[id];
+  }
+  await env.INBOX.put("watcher:replies", JSON.stringify(seen));
+  for (const [agent, count] of Object.entries(counts)) summary.replies.push({ agent, count });
+}
+
+async function runWatcher(env) {
+  const summary = {
+    ok: true,
+    started: Date.now(),
+    checked: 0,
+    notified: [],
+    repliesChecked: 0,
+    replies: [],
+    errors: [],
+  };
+  // The two passes are independent: a failure in one must not hide the other.
+  try {
+    await watchQueued(env, summary);
   } catch (e) {
     summary.ok = false;
-    summary.errors.push(String((e && e.message) || e).slice(0, 300));
+    summary.errors.push(`queued: ${String((e && e.message) || e).slice(0, 300)}`);
+  }
+  try {
+    await watchReplies(env, summary);
+  } catch (e) {
+    summary.ok = false;
+    summary.errors.push(`replies: ${String((e && e.message) || e).slice(0, 300)}`);
   }
   summary.finished = Date.now();
   await env.INBOX.put("watcher:last-run", JSON.stringify(summary));
